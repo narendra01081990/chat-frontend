@@ -35,7 +35,10 @@ const VideoCallContext = createContext<VideoCallContextType | undefined>(undefin
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    // Add TURN here for production
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
   ]
 };
 
@@ -51,28 +54,48 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   const { currentUser } = useUser();
   const { users, socket } = useChat() as { users: any; socket: Socket | null };
   const peerConnections = useRef<{ [userId: string]: RTCPeerConnection }>({});
+  const ringtoneRef = useRef<HTMLAudioElement | null>(null);
+  const incomingCallData = useRef<any>(null);
 
-  // Add a ringtone audio element
-  const ringtone = typeof Audio !== 'undefined' ? new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3') : null;
+  // Initialize ringtone
+  useEffect(() => {
+    if (typeof Audio !== 'undefined') {
+      ringtoneRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+      ringtoneRef.current.loop = true;
+    }
+  }, []);
 
-  // --- WebRTC Mesh Logic ---
   // Helper: Get local media
   const getLocalStream = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       alert('Your browser does not support camera/microphone access. Please use a modern browser.');
       throw new Error('mediaDevices.getUserMedia not supported');
     }
-    if (!localStream) {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }, 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
       setLocalStream(stream);
       return stream;
+    } catch (error) {
+      console.error('Error accessing media devices:', error);
+      throw error;
     }
-    return localStream;
   };
 
   // Create peer connection for a user
   const createPeerConnection = (userId: string) => {
     const pc = new RTCPeerConnection(ICE_SERVERS);
+    
     pc.onicecandidate = (event) => {
       if (event.candidate && socket && currentUser) {
         socket.emit('webrtc_ice_candidate', {
@@ -82,11 +105,28 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
         });
       }
     };
+
     pc.ontrack = (event) => {
-      setCallParticipants(prev => prev.map(p =>
-        p.id === userId ? { ...p, stream: event.streams[0] } : p
-      ));
+      console.log('Received remote stream for user:', userId);
+      setCallParticipants(prev => {
+        const existing = prev.find(p => p.id === userId);
+        if (existing && existing.stream === event.streams[0]) {
+          return prev; // Stream already set
+        }
+        return prev.map(p => 
+          p.id === userId ? { ...p, stream: event.streams[0] } : p
+        );
+      });
     };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log(`ICE connection state for ${userId}:`, pc.iceConnectionState);
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log(`Connection state for ${userId}:`, pc.connectionState);
+    };
+
     peerConnections.current[userId] = pc;
     return pc;
   };
@@ -94,19 +134,40 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   // Handle offer
   const handleOffer = async (data: any) => {
     if (!currentUser) return;
+    
+    console.log('Handling offer from:', data.from);
+    
     let pc = peerConnections.current[data.from];
-    if (!pc) pc = createPeerConnection(data.from);
-    await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-    const stream = await getLocalStream();
-    stream.getTracks().forEach(track => pc.addTrack(track, stream));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    if (socket) {
-      socket.emit('webrtc_answer', {
-        to: data.from,
-        from: currentUser.id,
-        answer
+    if (!pc) {
+      pc = createPeerConnection(data.from);
+    }
+
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+      
+      // Get local stream if not already available
+      let stream = localStream;
+      if (!stream) {
+        stream = await getLocalStream();
+      }
+      
+      // Add tracks to peer connection
+      stream.getTracks().forEach(track => {
+        pc.addTrack(track, stream!);
       });
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      
+      if (socket) {
+        socket.emit('webrtc_answer', {
+          to: data.from,
+          from: currentUser.id,
+          answer
+        });
+      }
+    } catch (error) {
+      console.error('Error handling offer:', error);
     }
   };
 
@@ -114,7 +175,12 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   const handleAnswer = async (data: any) => {
     const pc = peerConnections.current[data.from];
     if (pc) {
-      await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        console.log('Set remote description for:', data.from);
+      } catch (error) {
+        console.error('Error handling answer:', error);
+      }
     }
   };
 
@@ -122,7 +188,26 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   const handleIceCandidate = (data: any) => {
     const pc = peerConnections.current[data.from];
     if (pc && data.candidate) {
-      pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+      try {
+        pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+      } catch (error) {
+        console.error('Error adding ICE candidate:', error);
+      }
+    }
+  };
+
+  // Stop ringtone
+  const stopRingtone = () => {
+    if (ringtoneRef.current) {
+      ringtoneRef.current.pause();
+      ringtoneRef.current.currentTime = 0;
+    }
+  };
+
+  // Start ringtone
+  const startRingtone = () => {
+    if (ringtoneRef.current) {
+      ringtoneRef.current.play().catch(console.error);
     }
   };
 
@@ -132,44 +217,56 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
     // Handler: incoming call
     const handleIncomingCall = (data: any) => {
+      console.log('Incoming call from:', data.from);
       if (data.from.userId !== currentUser.id) {
+        incomingCallData.current = data.from;
         setCallIncoming(true);
-        // Play ringtone for incoming call
-        if (ringtone) {
-          ringtone.loop = true;
-          ringtone.play().catch(() => {});
-        }
+        startRingtone();
       }
     };
 
     // Handler: call accepted
     const handleCallAccepted = async (data: any) => {
+      console.log('Call accepted by:', data.username);
+      
+      // Stop ringtone if this user accepted the call
+      if (data.userId === currentUser.id) {
+        stopRingtone();
+      }
+
       setCallParticipants(prev => {
         if (prev.some(p => p.id === data.userId)) return prev;
         return [...prev, { id: data.userId, username: data.username }];
       });
-      setInCall(true);
-      // Initiate WebRTC connection if you are already in call
+
+      // If we're already in call and someone else accepted, create peer connection
       if (inCall && currentUser.id !== data.userId) {
-        // Initiator creates offer
-        const pc = createPeerConnection(data.userId);
-        const stream = await getLocalStream();
-        stream.getTracks().forEach(track => pc.addTrack(track, stream));
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        if (socket) {
-          socket.emit('webrtc_offer', {
-            to: data.userId,
-            from: currentUser.id,
-            offer
-          });
+        try {
+          const pc = createPeerConnection(data.userId);
+          const stream = localStream || await getLocalStream();
+          stream.getTracks().forEach(track => pc.addTrack(track, stream));
+          
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          
+          if (socket) {
+            socket.emit('webrtc_offer', {
+              to: data.userId,
+              from: currentUser.id,
+              offer
+            });
+          }
+        } catch (error) {
+          console.error('Error creating offer for accepted call:', error);
         }
       }
     };
 
     // Handler: call rejected
     const handleCallRejected = (data: any) => {
+      console.log('Call rejected by:', data.username);
       setCallParticipants(prev => prev.filter(p => p.id !== data.userId));
+      
       if (peerConnections.current[data.userId]) {
         peerConnections.current[data.userId].close();
         delete peerConnections.current[data.userId];
@@ -177,18 +274,17 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     };
 
     // Handler: call ended
-    const handleCallEnded = () => {
+    const handleCallEnded = (data: any) => {
+      console.log('Call ended by:', data.username);
+      stopRingtone();
       setInCall(false);
       setCallParticipants([]);
       setLocalStream(null);
       setCallIncoming(false);
+      
+      // Close all peer connections
       Object.values(peerConnections.current).forEach(pc => pc.close());
       peerConnections.current = {};
-      // Stop ringtone
-      if (ringtone) {
-        ringtone.pause();
-        ringtone.currentTime = 0;
-      }
     };
 
     // WebRTC signaling
@@ -209,54 +305,40 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       socket.off('call_rejected', handleCallRejected);
       socket.off('call_ended', handleCallEnded);
     };
-  }, [socket, currentUser, inCall]);
+  }, [socket, currentUser, inCall, localStream]);
 
   // Start a call
   const startCall = async () => {
     if (!socket || !currentUser) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Your browser does not support camera/microphone access. Please use a modern browser.');
-      return;
-    }
-    let stream: MediaStream | null = null;
+    
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream);
-    } catch (err) {
-      alert('Could not access camera/mic: ' + err);
-      return;
+      const stream = await getLocalStream();
+      setInCall(true);
+      setCallParticipants([{ id: currentUser.id, username: currentUser.username, isSelf: true }]);
+      socket.emit('start_call', { username: currentUser.username, userId: currentUser.id });
+    } catch (error) {
+      console.error('Error starting call:', error);
+      alert('Could not access camera/microphone. Please check permissions.');
     }
-    setInCall(true);
-    setCallParticipants([{ id: currentUser.id, username: currentUser.username, isSelf: true }]);
-    socket.emit('start_call', { username: currentUser.username, userId: currentUser.id });
   };
 
   // Accept a call
   const acceptCall = async () => {
     if (!socket || !currentUser) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Your browser does not support camera/microphone access. Please use a modern browser.');
-      return;
-    }
-    let stream: MediaStream | null = null;
+    
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream);
-    } catch (err) {
-      alert('Could not access camera/mic: ' + err);
-      return;
-    }
-    socket.emit('accept_call', { username: currentUser.username, userId: currentUser.id });
-    setInCall(true);
-    setCallIncoming(false);
-    setCallParticipants(prev => {
-      if (prev.some(p => p.id === currentUser.id)) return prev;
-      return [...prev, { id: currentUser.id, username: currentUser.username, isSelf: true }];
-    });
-    // Stop ringtone
-    if (ringtone) {
-      ringtone.pause();
-      ringtone.currentTime = 0;
+      const stream = await getLocalStream();
+      socket.emit('accept_call', { username: currentUser.username, userId: currentUser.id });
+      setInCall(true);
+      setCallIncoming(false);
+      setCallParticipants(prev => {
+        if (prev.some(p => p.id === currentUser.id)) return prev;
+        return [...prev, { id: currentUser.id, username: currentUser.username, isSelf: true }];
+      });
+      stopRingtone();
+    } catch (error) {
+      console.error('Error accepting call:', error);
+      alert('Could not access camera/microphone. Please check permissions.');
     }
   };
 
@@ -265,11 +347,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     if (!socket || !currentUser) return;
     socket.emit('reject_call', { username: currentUser.username, userId: currentUser.id });
     setCallIncoming(false);
-    // Stop ringtone
-    if (ringtone) {
-      ringtone.pause();
-      ringtone.currentTime = 0;
-    }
+    stopRingtone();
   };
 
   // End a call
@@ -280,62 +358,74 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     setCallParticipants([]);
     setLocalStream(null);
     setCallIncoming(false);
+    stopRingtone();
+    
+    // Close all peer connections
     Object.values(peerConnections.current).forEach(pc => pc.close());
     peerConnections.current = {};
-    // Stop ringtone
-    if (ringtone) {
-      ringtone.pause();
-      ringtone.currentTime = 0;
-    }
   };
 
   // Mute/unmute
   const toggleMute = () => {
     if (localStream) {
-      localStream.getAudioTracks().forEach(track => {
+      const audioTracks = localStream.getAudioTracks();
+      audioTracks.forEach(track => {
         track.enabled = !track.enabled;
-        setIsMuted(!track.enabled);
       });
+      setIsMuted(!audioTracks[0]?.enabled);
     }
   };
 
   // Camera on/off
   const toggleCamera = () => {
     if (localStream) {
-      localStream.getVideoTracks().forEach(track => {
+      const videoTracks = localStream.getVideoTracks();
+      videoTracks.forEach(track => {
         track.enabled = !track.enabled;
-        setIsCameraOn(track.enabled);
       });
+      setIsCameraOn(!videoTracks[0]?.enabled);
     }
   };
 
   // Switch camera (if supported)
   const switchCamera = async () => {
     if (!localStream) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Your browser does not support camera/microphone access. Please use a modern browser.');
-      return;
+    
+    try {
+      const videoTrack = localStream.getVideoTracks()[0];
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(d => d.kind === 'videoinput');
+      
+      if (videoDevices.length < 2) {
+        alert('No additional cameras found');
+        return;
+      }
+      
+      const currentDeviceId = videoTrack.getSettings().deviceId;
+      const nextDevice = videoDevices.find(d => d.deviceId !== currentDeviceId) || videoDevices[0];
+      
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: nextDevice.deviceId } },
+        audio: true
+      });
+      
+      // Replace video track in localStream
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      localStream.removeTrack(videoTrack);
+      localStream.addTrack(newVideoTrack);
+      
+      // Replace video track in all peer connections
+      Object.values(peerConnections.current).forEach(pc => {
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (sender) sender.replaceTrack(newVideoTrack);
+      });
+      
+      // Stop the new stream (we only needed the track)
+      newStream.getTracks().forEach(track => track.stop());
+    } catch (error) {
+      console.error('Error switching camera:', error);
+      alert('Could not switch camera');
     }
-    const videoTrack = localStream.getVideoTracks()[0];
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const videoDevices = devices.filter(d => d.kind === 'videoinput');
-    if (videoDevices.length < 2) return;
-    const currentDeviceId = videoTrack.getSettings().deviceId;
-    const nextDevice = videoDevices.find(d => d.deviceId !== currentDeviceId) || videoDevices[0];
-    const newStream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { exact: nextDevice.deviceId } },
-      audio: true
-    });
-    // Replace video track in localStream
-    const newVideoTrack = newStream.getVideoTracks()[0];
-    localStream.removeTrack(videoTrack);
-    localStream.addTrack(newVideoTrack);
-    setLocalStream(newStream);
-    // Replace video track in all peer connections
-    Object.values(peerConnections.current).forEach(pc => {
-      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-      if (sender) sender.replaceTrack(newVideoTrack);
-    });
   };
 
   // Speaker selection
@@ -344,8 +434,6 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       navigator.mediaDevices.enumerateDevices().then(devices => {
         setAvailableAudioOutputs(devices.filter(d => d.kind === 'audiooutput'));
       });
-    } else {
-      setAvailableAudioOutputs([]);
     }
   }, [inCall]);
 
