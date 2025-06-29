@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, ReactNod
 import { useUser } from './UserContext';
 import { useChat } from './ChatContext';
 import { Socket } from 'socket.io-client';
+import { toast } from 'react-toastify';
 
 export interface Participant {
   id: string;
@@ -65,6 +66,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   const incomingCallData = useRef<any>(null);
   const callInitiator = useRef<string | null>(null);
   const activeCallUsers = useRef<Set<string>>(new Set());
+  const [isJoiningCall, setIsJoiningCall] = useState(false);
 
   // Initialize ringtone
   useEffect(() => {
@@ -110,7 +112,6 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          latency: 0.01,
           sampleRate: 48000,
           channelCount: 2
         }).catch(console.error);
@@ -259,6 +260,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       console.log('Incoming call from:', data.from);
       if (data.from.userId !== currentUser.id) {
         incomingCallData.current = data.from;
+        callInitiator.current = data.from.userId;
         setCallIncoming(true);
         startRingtone();
       }
@@ -271,6 +273,18 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       // Add user to active call set
       activeCallUsers.current.add(data.userId);
       setIsCallActive(true);
+      
+      // Show toast notification for call acceptance
+      if (data.userId !== currentUser.id) {
+        toast.success(`${data.username} accepted the video call`, {
+          position: 'top-right',
+          autoClose: 3000,
+          hideProgressBar: false,
+          closeOnClick: true,
+          pauseOnHover: true,
+          draggable: true
+        });
+      }
       
       // Stop ringtone if this user accepted the call
       if (data.userId === currentUser.id) {
@@ -310,6 +324,16 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
           console.error('Error creating offer for accepted call:', error);
         }
       }
+      
+      // If we're the one who accepted the call, create peer connection with initiator
+      if (data.userId === currentUser.id && callInitiator.current && callInitiator.current !== currentUser.id) {
+        console.log('Creating peer connection as acceptor with initiator:', callInitiator.current);
+        try {
+          await createPeerConnectionForUser(callInitiator.current);
+        } catch (error) {
+          console.error('Error creating peer connection with initiator:', error);
+        }
+      }
     };
 
     // Handler: call rejected
@@ -341,23 +365,58 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       peerConnections.current = {};
     };
 
+    // Handler: existing call participants (when joining existing call)
+    const handleExistingCallParticipants = async (data: any) => {
+      console.log('Received existing call participants:', data.participants);
+      
+      // Create peer connections with all existing participants
+      for (const participant of data.participants) {
+        if (participant.id !== currentUser.id && !peerConnections.current[participant.id]) {
+          console.log('Creating peer connection with existing participant:', participant.id);
+          await createPeerConnectionForUser(participant.id);
+        }
+      }
+      
+      // Also add existing participants to our call participants list
+      setCallParticipants(prev => {
+        const newParticipants = [...prev];
+        data.participants.forEach((participant: any) => {
+          if (!newParticipants.some(p => p.id === participant.id)) {
+            newParticipants.push({ id: participant.id, username: participant.username });
+          }
+        });
+        return newParticipants;
+      });
+    };
+
     // Handler: user joined existing call
     const handleUserJoinedCall = (data: any) => {
       console.log('User joined existing call:', data.username);
       activeCallUsers.current.add(data.userId);
       setIsCallActive(true);
       
+      // Show toast notification for call join
+      if (data.userId !== currentUser.id) {
+        toast.success(`${data.username} joined the video call`, {
+          position: 'top-right',
+          autoClose: 3000,
+          hideProgressBar: false,
+          closeOnClick: true,
+          pauseOnHover: true,
+          draggable: true
+        });
+      }
+      
       setCallParticipants(prev => {
         if (prev.some(p => p.id === data.userId)) return prev;
         return [...prev, { id: data.userId, username: data.username }];
       });
 
-      // Create peer connections for all existing participants
-      callParticipants.forEach(participant => {
-        if (participant.id !== currentUser.id && !peerConnections.current[participant.id]) {
-          createPeerConnectionForUser(participant.id);
-        }
-      });
+      // If we're already in the call, create peer connection with the new joiner
+      if (inCall && currentUser && currentUser.id !== data.userId) {
+        console.log('Creating peer connection with new joiner:', data.userId);
+        createPeerConnectionForUser(data.userId);
+      }
     };
 
     // WebRTC signaling
@@ -368,6 +427,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     socket.on('call_accepted', handleCallAccepted);
     socket.on('call_rejected', handleCallRejected);
     socket.on('call_ended', handleCallEnded);
+    socket.on('existing_call_participants', handleExistingCallParticipants);
     socket.on('user_joined_call', handleUserJoinedCall);
 
     return () => {
@@ -378,6 +438,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       socket.off('call_accepted', handleCallAccepted);
       socket.off('call_rejected', handleCallRejected);
       socket.off('call_ended', handleCallEnded);
+      socket.off('existing_call_participants', handleExistingCallParticipants);
       socket.off('user_joined_call', handleUserJoinedCall);
     };
   }, [socket, currentUser, inCall, localStream, callParticipants]);
@@ -453,21 +514,49 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
   // Join existing call
   const joinCall = async () => {
-    if (!socket || !currentUser || !isCallActive) return;
-    
+    if (!currentUser || !socket) return;
+
     try {
-      const stream = await getLocalStream();
-      socket.emit('join_call', { username: currentUser.username, userId: currentUser.id });
-      setInCall(true);
-      activeCallUsers.current.add(currentUser.id);
+      console.log('Joining existing call...');
+      setIsJoiningCall(true);
+      
+      // Get local media stream
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { 
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 }
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000,
+          channelCount: 2
+        }
+      });
+
+      setLocalStream(stream);
+      
+      // Add current user to call participants
       setCallParticipants(prev => {
         if (prev.some(p => p.id === currentUser.id)) return prev;
         return [...prev, { id: currentUser.id, username: currentUser.username, isSelf: true }];
       });
-      console.log('Joined existing call');
+      
+      // Emit join call event (using correct event name)
+      socket.emit('join_call', {
+        userId: currentUser.id,
+        username: currentUser.username
+      });
+
+      setInCall(true);
+      setIsJoiningCall(false);
+      console.log('Successfully joined call');
+      
     } catch (error) {
       console.error('Error joining call:', error);
-      alert('Could not access camera/microphone. Please check permissions.');
+      setIsJoiningCall(false);
     }
   };
 
