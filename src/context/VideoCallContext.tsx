@@ -56,6 +56,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   const peerConnections = useRef<{ [userId: string]: RTCPeerConnection }>({});
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
   const incomingCallData = useRef<any>(null);
+  const callInitiator = useRef<string | null>(null);
 
   // Initialize ringtone
   useEffect(() => {
@@ -94,10 +95,12 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
   // Create peer connection for a user
   const createPeerConnection = (userId: string) => {
+    console.log('Creating peer connection for user:', userId);
     const pc = new RTCPeerConnection(ICE_SERVERS);
     
     pc.onicecandidate = (event) => {
       if (event.candidate && socket && currentUser) {
+        console.log('Sending ICE candidate to:', userId);
         socket.emit('webrtc_ice_candidate', {
           to: userId,
           from: currentUser.id,
@@ -107,7 +110,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     };
 
     pc.ontrack = (event) => {
-      console.log('Received remote stream for user:', userId);
+      console.log('Received remote stream for user:', userId, event.streams[0]);
       setCallParticipants(prev => {
         const existing = prev.find(p => p.id === userId);
         if (existing && existing.stream === event.streams[0]) {
@@ -144,20 +147,24 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+      console.log('Set remote description for offer from:', data.from);
       
       // Get local stream if not already available
       let stream = localStream;
       if (!stream) {
+        console.log('Getting local stream for offer response');
         stream = await getLocalStream();
       }
       
       // Add tracks to peer connection
       stream.getTracks().forEach(track => {
+        console.log('Adding track to peer connection:', track.kind);
         pc.addTrack(track, stream!);
       });
 
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      console.log('Created and set local answer for:', data.from);
       
       if (socket) {
         socket.emit('webrtc_answer', {
@@ -177,7 +184,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     if (pc) {
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-        console.log('Set remote description for:', data.from);
+        console.log('Set remote description for answer from:', data.from);
       } catch (error) {
         console.error('Error handling answer:', error);
       }
@@ -190,6 +197,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     if (pc && data.candidate) {
       try {
         pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        console.log('Added ICE candidate from:', data.from);
       } catch (error) {
         console.error('Error adding ICE candidate:', error);
       }
@@ -227,7 +235,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
     // Handler: call accepted
     const handleCallAccepted = async (data: any) => {
-      console.log('Call accepted by:', data.username);
+      console.log('Call accepted by:', data.username, 'User ID:', data.userId);
       
       // Stop ringtone if this user accepted the call
       if (data.userId === currentUser.id) {
@@ -239,15 +247,22 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
         return [...prev, { id: data.userId, username: data.username }];
       });
 
-      // If we're already in call and someone else accepted, create peer connection
-      if (inCall && currentUser.id !== data.userId) {
+      // If we're the call initiator and someone accepted, create peer connection
+      if (callInitiator.current === currentUser.id && currentUser.id !== data.userId) {
+        console.log('Creating peer connection as initiator for:', data.userId);
         try {
           const pc = createPeerConnection(data.userId);
           const stream = localStream || await getLocalStream();
-          stream.getTracks().forEach(track => pc.addTrack(track, stream));
+          
+          // Add tracks to peer connection
+          stream.getTracks().forEach(track => {
+            console.log('Adding track to peer connection as initiator:', track.kind);
+            pc.addTrack(track, stream);
+          });
           
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
+          console.log('Created offer as initiator for:', data.userId);
           
           if (socket) {
             socket.emit('webrtc_offer', {
@@ -281,6 +296,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       setCallParticipants([]);
       setLocalStream(null);
       setCallIncoming(false);
+      callInitiator.current = null;
       
       // Close all peer connections
       Object.values(peerConnections.current).forEach(pc => pc.close());
@@ -314,8 +330,10 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     try {
       const stream = await getLocalStream();
       setInCall(true);
+      callInitiator.current = currentUser.id;
       setCallParticipants([{ id: currentUser.id, username: currentUser.username, isSelf: true }]);
       socket.emit('start_call', { username: currentUser.username, userId: currentUser.id });
+      console.log('Started call as initiator');
     } catch (error) {
       console.error('Error starting call:', error);
       alert('Could not access camera/microphone. Please check permissions.');
@@ -336,6 +354,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
         return [...prev, { id: currentUser.id, username: currentUser.username, isSelf: true }];
       });
       stopRingtone();
+      console.log('Accepted call');
     } catch (error) {
       console.error('Error accepting call:', error);
       alert('Could not access camera/microphone. Please check permissions.');
@@ -358,6 +377,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     setCallParticipants([]);
     setLocalStream(null);
     setCallIncoming(false);
+    callInitiator.current = null;
     stopRingtone();
     
     // Close all peer connections

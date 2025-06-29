@@ -23,17 +23,21 @@ const VideoCallScreen: React.FC = () => {
   // Handle local video stream
   useEffect(() => {
     if (localVideoRef.current && localStream) {
+      console.log('Setting local video stream');
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
 
   // Handle remote video streams
   useEffect(() => {
+    console.log('Call participants updated:', callParticipants);
     callParticipants.forEach(participant => {
       if (!participant.isSelf && participant.stream) {
+        console.log('Setting remote stream for:', participant.username, participant.stream);
         const videoElement = remoteVideoRefs.current[participant.id];
         if (videoElement && videoElement.srcObject !== participant.stream) {
           videoElement.srcObject = participant.stream;
+          console.log('Remote stream set for:', participant.username);
         }
       }
     });
@@ -86,7 +90,13 @@ const VideoCallScreen: React.FC = () => {
         {remoteParticipants.map(participant => (
           <div key={participant.id} className="relative">
             <video
-              ref={el => remoteVideoRefs.current[participant.id] = el}
+              ref={el => {
+                remoteVideoRefs.current[participant.id] = el;
+                if (el && participant.stream) {
+                  console.log('Setting stream for video element:', participant.username);
+                  el.srcObject = participant.stream;
+                }
+              }}
               className="w-full h-full rounded-lg border-2 border-blue-500 object-cover"
               autoPlay
               playsInline
@@ -102,6 +112,11 @@ const VideoCallScreen: React.FC = () => {
                 </div>
               </div>
             )}
+            {participant.stream && (
+              <div className="absolute bottom-2 right-2 bg-green-500 text-white px-2 py-1 rounded text-sm">
+                Connected
+              </div>
+            )}
           </div>
         ))}
 
@@ -114,6 +129,13 @@ const VideoCallScreen: React.FC = () => {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Debug info */}
+      <div className="px-8 py-2 bg-gray-800 text-white text-sm">
+        <div>Local Stream: {localStream ? '✅ Active' : '❌ None'}</div>
+        <div>Remote Participants: {remoteParticipants.length}</div>
+        <div>Remote Streams: {remoteParticipants.filter(p => p.stream).length}</div>
       </div>
 
       {/* Control buttons */}
