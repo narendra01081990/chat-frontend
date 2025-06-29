@@ -19,10 +19,12 @@ interface VideoCallContextType {
   isCameraOn: boolean;
   audioOutputId: string | null;
   availableAudioOutputs: MediaDeviceInfo[];
+  isCallActive: boolean;
   startCall: () => void;
   acceptCall: () => void;
   rejectCall: () => void;
   endCall: () => void;
+  joinCall: () => void;
   setLocalStream: (stream: MediaStream | null) => void;
   toggleMute: () => void;
   toggleCamera: () => void;
@@ -32,14 +34,18 @@ interface VideoCallContextType {
 
 const VideoCallContext = createContext<VideoCallContextType | undefined>(undefined);
 
-const ICE_SERVERS = {
+const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
-  ]
+  ],
+  iceCandidatePoolSize: 10,
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require',
+  iceTransportPolicy: 'all'
 };
 
 export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
@@ -51,12 +57,14 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   const [isCameraOn, setIsCameraOn] = useState(true);
   const [audioOutputId, setAudioOutputId] = useState<string | null>(null);
   const [availableAudioOutputs, setAvailableAudioOutputs] = useState<MediaDeviceInfo[]>([]);
+  const [isCallActive, setIsCallActive] = useState(false);
   const { currentUser } = useUser();
   const { users, socket } = useChat() as { users: any; socket: Socket | null };
   const peerConnections = useRef<{ [userId: string]: RTCPeerConnection }>({});
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
   const incomingCallData = useRef<any>(null);
   const callInitiator = useRef<string | null>(null);
+  const activeCallUsers = useRef<Set<string>>(new Set());
 
   // Initialize ringtone
   useEffect(() => {
@@ -66,7 +74,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     }
   }, []);
 
-  // Helper: Get local media
+  // Helper: Get local media with high quality audio
   const getLocalStream = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       alert('Your browser does not support camera/microphone access. Please use a modern browser.');
@@ -82,9 +90,32 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          sampleRate: 48000, // High quality audio
+          channelCount: 2 // Stereo
         } 
       });
+
+      // Optimize audio tracks for real-time communication
+      const audioTracks = stream.getAudioTracks();
+      audioTracks.forEach(track => {
+        // Enable real-time audio processing
+        if (track.getSettings) {
+          const settings = track.getSettings();
+          console.log('Audio track settings:', settings);
+        }
+        
+        // Set audio track constraints for low latency
+        track.applyConstraints({
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          latency: 0.01,
+          sampleRate: 48000,
+          channelCount: 2
+        }).catch(console.error);
+      });
+
       setLocalStream(stream);
       return stream;
     } catch (error) {
@@ -237,6 +268,10 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     const handleCallAccepted = async (data: any) => {
       console.log('Call accepted by:', data.username, 'User ID:', data.userId);
       
+      // Add user to active call set
+      activeCallUsers.current.add(data.userId);
+      setIsCallActive(true);
+      
       // Stop ringtone if this user accepted the call
       if (data.userId === currentUser.id) {
         stopRingtone();
@@ -281,6 +316,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     const handleCallRejected = (data: any) => {
       console.log('Call rejected by:', data.username);
       setCallParticipants(prev => prev.filter(p => p.id !== data.userId));
+      activeCallUsers.current.delete(data.userId);
       
       if (peerConnections.current[data.userId]) {
         peerConnections.current[data.userId].close();
@@ -296,11 +332,32 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       setCallParticipants([]);
       setLocalStream(null);
       setCallIncoming(false);
+      setIsCallActive(false);
       callInitiator.current = null;
+      activeCallUsers.current.clear();
       
       // Close all peer connections
       Object.values(peerConnections.current).forEach(pc => pc.close());
       peerConnections.current = {};
+    };
+
+    // Handler: user joined existing call
+    const handleUserJoinedCall = (data: any) => {
+      console.log('User joined existing call:', data.username);
+      activeCallUsers.current.add(data.userId);
+      setIsCallActive(true);
+      
+      setCallParticipants(prev => {
+        if (prev.some(p => p.id === data.userId)) return prev;
+        return [...prev, { id: data.userId, username: data.username }];
+      });
+
+      // Create peer connections for all existing participants
+      callParticipants.forEach(participant => {
+        if (participant.id !== currentUser.id && !peerConnections.current[participant.id]) {
+          createPeerConnectionForUser(participant.id);
+        }
+      });
     };
 
     // WebRTC signaling
@@ -311,6 +368,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     socket.on('call_accepted', handleCallAccepted);
     socket.on('call_rejected', handleCallRejected);
     socket.on('call_ended', handleCallEnded);
+    socket.on('user_joined_call', handleUserJoinedCall);
 
     return () => {
       socket.off('webrtc_offer', handleOffer);
@@ -320,8 +378,36 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       socket.off('call_accepted', handleCallAccepted);
       socket.off('call_rejected', handleCallRejected);
       socket.off('call_ended', handleCallEnded);
+      socket.off('user_joined_call', handleUserJoinedCall);
     };
-  }, [socket, currentUser, inCall, localStream]);
+  }, [socket, currentUser, inCall, localStream, callParticipants]);
+
+  // Helper function to create peer connection for a user
+  const createPeerConnectionForUser = async (userId: string) => {
+    if (!currentUser) return;
+    
+    try {
+      const pc = createPeerConnection(userId);
+      const stream = localStream || await getLocalStream();
+      
+      stream.getTracks().forEach(track => {
+        pc.addTrack(track, stream);
+      });
+      
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      
+      if (socket) {
+        socket.emit('webrtc_offer', {
+          to: userId,
+          from: currentUser.id,
+          offer
+        });
+      }
+    } catch (error) {
+      console.error('Error creating peer connection for user:', error);
+    }
+  };
 
   // Start a call
   const startCall = async () => {
@@ -330,7 +416,9 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     try {
       const stream = await getLocalStream();
       setInCall(true);
+      setIsCallActive(true);
       callInitiator.current = currentUser.id;
+      activeCallUsers.current.add(currentUser.id);
       setCallParticipants([{ id: currentUser.id, username: currentUser.username, isSelf: true }]);
       socket.emit('start_call', { username: currentUser.username, userId: currentUser.id });
       console.log('Started call as initiator');
@@ -348,7 +436,9 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       const stream = await getLocalStream();
       socket.emit('accept_call', { username: currentUser.username, userId: currentUser.id });
       setInCall(true);
+      setIsCallActive(true);
       setCallIncoming(false);
+      activeCallUsers.current.add(currentUser.id);
       setCallParticipants(prev => {
         if (prev.some(p => p.id === currentUser.id)) return prev;
         return [...prev, { id: currentUser.id, username: currentUser.username, isSelf: true }];
@@ -357,6 +447,26 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       console.log('Accepted call');
     } catch (error) {
       console.error('Error accepting call:', error);
+      alert('Could not access camera/microphone. Please check permissions.');
+    }
+  };
+
+  // Join existing call
+  const joinCall = async () => {
+    if (!socket || !currentUser || !isCallActive) return;
+    
+    try {
+      const stream = await getLocalStream();
+      socket.emit('join_call', { username: currentUser.username, userId: currentUser.id });
+      setInCall(true);
+      activeCallUsers.current.add(currentUser.id);
+      setCallParticipants(prev => {
+        if (prev.some(p => p.id === currentUser.id)) return prev;
+        return [...prev, { id: currentUser.id, username: currentUser.username, isSelf: true }];
+      });
+      console.log('Joined existing call');
+    } catch (error) {
+      console.error('Error joining call:', error);
       alert('Could not access camera/microphone. Please check permissions.');
     }
   };
@@ -377,7 +487,9 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     setCallParticipants([]);
     setLocalStream(null);
     setCallIncoming(false);
+    setIsCallActive(false);
     callInitiator.current = null;
+    activeCallUsers.current.clear();
     stopRingtone();
     
     // Close all peer connections
@@ -482,10 +594,12 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       isCameraOn,
       audioOutputId,
       availableAudioOutputs,
+      isCallActive,
       startCall,
       acceptCall,
       rejectCall,
       endCall,
+      joinCall,
       setLocalStream,
       toggleMute,
       toggleCamera,
