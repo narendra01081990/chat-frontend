@@ -28,8 +28,8 @@ export const getBackendUrl = () => {
     // In development, try to use the configured URL or default to local IP
     return config.backendUrl;
   }
-  // In production, use the same host as the frontend
-  return `${window.location.protocol}//${window.location.hostname}:5000`;
+  // In production, use the Render backend URL
+  return 'https://chat-backend-lfwv.onrender.com';
 };
 
 // Helper function to get the correct socket URL
@@ -37,5 +37,6 @@ export const getSocketUrl = () => {
   if (import.meta.env.DEV) {
     return config.socketUrl;
   }
-  return `${window.location.protocol}//${window.location.hostname}:5000`;
+  // In production, use environment variable or fallback
+  return import.meta.env.VITE_SOCKET_URL || 'https://chat-backend-lfwv.onrender.com';
 }; 
