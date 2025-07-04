@@ -40,3 +40,11 @@ export const getSocketUrl = () => {
   // In production, use environment variable or fallback
   return import.meta.env.VITE_SOCKET_URL || 'https://chat-backend-lfwv.onrender.com';
 }; 
+
+socket.on('existing_call_participants', ({ participants }) => {
+  participants.forEach(participant => {
+    if (participant.id !== currentUser.id && !peers[participant.id]) {
+      createPeerConnection(participant.id, participant.socketId, false); // false = not initiator
+    }
+  });
+});
