@@ -368,15 +368,18 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     // Handler: existing call participants (when joining existing call)
     const handleExistingCallParticipants = async (data: any) => {
       console.log('Received existing call participants:', data.participants);
-      
-      // Create peer connections with all existing participants
+      // For each existing participant, create a peer connection and add tracks, but do NOT send an offer
       for (const participant of data.participants) {
         if (participant.id !== currentUser.id && !peerConnections.current[participant.id]) {
-          console.log('Creating peer connection with existing participant:', participant.id);
-          await createPeerConnectionForUser(participant.id);
+          console.log('Creating peer connection with existing participant (no offer):', participant.id);
+          const pc = createPeerConnection(participant.id);
+          const stream = localStream || await getLocalStream();
+          stream.getTracks().forEach(track => {
+            pc.addTrack(track, stream);
+          });
+          // Do NOT createOffer or setLocalDescription here!
         }
       }
-      
       // Also add existing participants to our call participants list
       setCallParticipants(prev => {
         const newParticipants = [...prev];
