@@ -37,6 +37,6 @@ export const getSocketUrl = () => {
   if (import.meta.env.DEV) {
     return config.socketUrl;
   }
-  // In production, always use the Render backend URL
-  return 'https://chat-backend-lfwv.onrender.com';
+  // In production, use environment variable or fallback
+  return import.meta.env.VITE_SOCKET_URL || 'https://chat-backend-lfwv.onrender.com';
 };
