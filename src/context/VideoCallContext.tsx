@@ -21,12 +21,11 @@ interface VideoCallContextType {
   audioOutputId: string | null;
   availableAudioOutputs: MediaDeviceInfo[];
   isCallActive: boolean;
-  peerConnections: React.MutableRefObject<{ [userId: string]: RTCPeerConnection }>;
-  startCall: () => void;
-  acceptCall: () => void;
+  startCall: () => Promise<void>;
+  acceptCall: () => Promise<void>;
   rejectCall: () => void;
   endCall: () => void;
-  joinCall: () => void;
+  joinCall: () => Promise<void>;
   setLocalStream: (stream: MediaStream | null) => void;
   toggleMute: () => void;
   toggleCamera: () => void;
@@ -36,6 +35,7 @@ interface VideoCallContextType {
 
 const VideoCallContext = createContext<VideoCallContextType | undefined>(undefined);
 
+// ICE Servers configuration
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -43,7 +43,6 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
-    // Add TURN servers for better NAT traversal
     {
       urls: [
         'turn:openrelay.metered.ca:80',
@@ -52,21 +51,11 @@ const ICE_SERVERS: RTCConfiguration = {
       ],
       username: 'openrelayproject',
       credential: 'openrelayproject'
-    },
-    {
-      urls: [
-        'turn:global.turn.twilio.com:3478?transport=udp',
-        'turn:global.turn.twilio.com:3478?transport=tcp',
-        'turn:global.turn.twilio.com:443?transport=tcp'
-      ],
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
     }
   ],
   iceCandidatePoolSize: 10,
   bundlePolicy: 'max-bundle',
-  rtcpMuxPolicy: 'require',
-  iceTransportPolicy: 'all'
+  rtcpMuxPolicy: 'require'
 };
 
 export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
@@ -79,14 +68,15 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   const [audioOutputId, setAudioOutputId] = useState<string | null>(null);
   const [availableAudioOutputs, setAvailableAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [isCallActive, setIsCallActive] = useState(false);
+  
   const { currentUser } = useUser();
-  const { users, socket } = useChat() as { users: any; socket: Socket | null };
+  const { socket } = useChat() as { socket: Socket | null };
+  
   const peerConnections = useRef<{ [userId: string]: RTCPeerConnection }>({});
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
   const incomingCallData = useRef<any>(null);
   const callInitiator = useRef<string | null>(null);
   const activeCallUsers = useRef<Set<string>>(new Set());
-  const [isJoiningCall, setIsJoiningCall] = useState(false);
 
   // Initialize ringtone
   useEffect(() => {
@@ -96,49 +86,29 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     }
   }, []);
 
-  // Helper: Get local media with high quality audio
-  const getLocalStream = async () => {
+  // Get local media stream
+  const getLocalStream = async (): Promise<MediaStream> => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Your browser does not support camera/microphone access. Please use a modern browser.');
-      throw new Error('mediaDevices.getUserMedia not supported');
+      throw new Error('Your browser does not support camera/microphone access');
     }
     
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
           frameRate: { ideal: 30 }
-        }, 
+        },
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
           sampleRate: 48000,
           channelCount: 2
-        } 
-      });
-
-      // Optimize audio tracks for real-time communication
-      const audioTracks = stream.getAudioTracks();
-      audioTracks.forEach(track => {
-        // Enable real-time audio processing
-        if (track.getSettings) {
-          const settings = track.getSettings();
-          console.log('Audio track settings:', settings);
         }
-        
-        // Set audio track constraints for low latency
-        track.applyConstraints({
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 48000,
-          channelCount: 2
-        }).catch(console.error);
       });
 
-      setLocalStream(stream);
+      console.log('Local stream obtained:', stream.getTracks().map(t => t.kind));
       return stream;
     } catch (error) {
       console.error('Error accessing media devices:', error);
@@ -146,9 +116,9 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     }
   };
 
-  // Create peer connection for a user
-  const createPeerConnection = (userId: string) => {
-    console.log('Creating peer connection for user:', userId);
+  // Create a new peer connection
+  const createPeerConnection = (userId: string): RTCPeerConnection => {
+    console.log('Creating peer connection for:', userId);
     
     // Close existing connection if any
     if (peerConnections.current[userId]) {
@@ -157,6 +127,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     
     const pc = new RTCPeerConnection(ICE_SERVERS);
     
+    // Handle ICE candidates
     pc.onicecandidate = (event) => {
       if (event.candidate && socket && currentUser) {
         console.log('Sending ICE candidate to:', userId);
@@ -168,13 +139,14 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       }
     };
 
+    // Handle incoming tracks
     pc.ontrack = (event) => {
-      console.log('Received remote stream for user:', userId, event.streams[0]);
+      console.log('Received remote stream for:', userId, event.streams[0]);
       if (event.streams && event.streams[0]) {
         setCallParticipants(prev => {
           const existing = prev.find(p => p.id === userId);
           if (existing && existing.stream === event.streams[0]) {
-            return prev; // Stream already set
+            return prev;
           }
           return prev.map(p => 
             p.id === userId ? { ...p, stream: event.streams[0] } : p
@@ -183,31 +155,16 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       }
     };
 
+    // Monitor connection states
     pc.oniceconnectionstatechange = () => {
       console.log(`ICE connection state for ${userId}:`, pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         console.log(`Successfully connected to ${userId}`);
-        // Force update participants to trigger video display
-        setCallParticipants(prev => [...prev]);
-      } else if (pc.iceConnectionState === 'failed') {
-        console.log(`Connection failed with ${userId}`);
-        // Try to recreate connection
-        setTimeout(() => {
-          if (peerConnections.current[userId] && peerConnections.current[userId].iceConnectionState === 'failed') {
-            console.log(`Attempting to recreate connection with ${userId}`);
-            createPeerConnectionForUser(userId);
-          }
-        }, 2000);
       }
     };
 
     pc.onconnectionstatechange = () => {
       console.log(`Connection state for ${userId}:`, pc.connectionState);
-      if (pc.connectionState === 'connected') {
-        console.log(`Peer connection established with ${userId}`);
-      } else if (pc.connectionState === 'failed') {
-        console.log(`Peer connection failed with ${userId}`);
-      }
     };
 
     pc.onsignalingstatechange = () => {
@@ -218,7 +175,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     return pc;
   };
 
-  // Handle offer
+  // Handle WebRTC offer
   const handleOffer = async (data: any) => {
     if (!currentUser) return;
     
@@ -233,32 +190,20 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
       console.log('Set remote description for offer from:', data.from);
       
-      // Get local stream if not already available
+      // Get local stream
       let stream = localStream;
       if (!stream) {
-        console.log('Getting local stream for offer response');
         stream = await getLocalStream();
+        setLocalStream(stream);
       }
       
-      // Check if tracks are already added to avoid duplication
-      const existingSenders = pc.getSenders();
-      const hasAudioTrack = existingSenders.some(sender => sender.track?.kind === 'audio');
-      const hasVideoTrack = existingSenders.some(sender => sender.track?.kind === 'video');
-      
-      // Add tracks only if they don't already exist
+      // Add tracks to peer connection
       stream.getTracks().forEach(track => {
-        const trackExists = existingSenders.some(sender => 
-          sender.track && sender.track.kind === track.kind
-        );
-        
-        if (!trackExists) {
-          console.log('Adding track to peer connection:', track.kind);
-          pc.addTrack(track, stream!);
-        } else {
-          console.log('Track already exists, skipping:', track.kind);
-        }
+        console.log('Adding track to peer connection:', track.kind);
+        pc.addTrack(track, stream!);
       });
 
+      // Create and send answer
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       console.log('Created and set local answer for:', data.from);
@@ -275,7 +220,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     }
   };
 
-  // Handle answer
+  // Handle WebRTC answer
   const handleAnswer = async (data: any) => {
     const pc = peerConnections.current[data.from];
     if (pc) {
@@ -301,7 +246,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     }
   };
 
-  // Stop ringtone
+  // Ringtone controls
   const stopRingtone = () => {
     if (ringtoneRef.current) {
       ringtoneRef.current.pause();
@@ -309,18 +254,16 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     }
   };
 
-  // Start ringtone
   const startRingtone = () => {
     if (ringtoneRef.current) {
       ringtoneRef.current.play().catch(console.error);
     }
   };
 
-  // --- Video Call Signaling Logic ---
+  // Socket event handlers
   useEffect(() => {
     if (!socket || !currentUser) return;
 
-    // Handler: incoming call
     const handleIncomingCall = (data: any) => {
       console.log('Incoming call from:', data.from);
       if (data.from.userId !== currentUser.id) {
@@ -331,27 +274,16 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       }
     };
 
-    // Handler: call accepted
     const handleCallAccepted = async (data: any) => {
       console.log('Call accepted by:', data.username, 'User ID:', data.userId);
       
-      // Add user to active call set
       activeCallUsers.current.add(data.userId);
       setIsCallActive(true);
       
-      // Show toast notification for call acceptance
       if (data.userId !== currentUser.id) {
-        toast.success(`${data.username} accepted the video call`, {
-          position: 'top-right',
-          autoClose: 3000,
-          hideProgressBar: false,
-          closeOnClick: true,
-          pauseOnHover: true,
-          draggable: true
-        });
+        toast.success(`${data.username} accepted the video call`);
       }
       
-      // Stop ringtone if this user accepted the call
       if (data.userId === currentUser.id) {
         stopRingtone();
       }
@@ -361,22 +293,19 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
         return [...prev, { id: data.userId, username: data.username }];
       });
 
-      // If we're the call initiator and someone accepted, create peer connection
+      // If we're the initiator and someone accepted, create peer connection
       if (callInitiator.current === currentUser.id && currentUser.id !== data.userId) {
         console.log('Creating peer connection as initiator for:', data.userId);
         try {
           const pc = createPeerConnection(data.userId);
           const stream = localStream || await getLocalStream();
           
-          // Add tracks to peer connection
           stream.getTracks().forEach(track => {
-            console.log('Adding track to peer connection as initiator:', track.kind);
             pc.addTrack(track, stream);
           });
           
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
-          console.log('Created offer as initiator for:', data.userId);
           
           if (socket) {
             socket.emit('webrtc_offer', {
@@ -390,18 +319,33 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
         }
       }
       
-      // If we're the one who accepted the call, create peer connection with initiator
+      // If we're the acceptor, create peer connection with initiator
       if (data.userId === currentUser.id && callInitiator.current && callInitiator.current !== currentUser.id) {
         console.log('Creating peer connection as acceptor with initiator:', callInitiator.current);
         try {
-          await createPeerConnectionForUser(callInitiator.current);
+          const pc = createPeerConnection(callInitiator.current);
+          const stream = localStream || await getLocalStream();
+          
+          stream.getTracks().forEach(track => {
+            pc.addTrack(track, stream);
+          });
+          
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          
+          if (socket) {
+            socket.emit('webrtc_offer', {
+              to: callInitiator.current,
+              from: currentUser.id,
+              offer
+            });
+          }
         } catch (error) {
           console.error('Error creating peer connection with initiator:', error);
         }
       }
     };
 
-    // Handler: call rejected
     const handleCallRejected = (data: any) => {
       console.log('Call rejected by:', data.username);
       setCallParticipants(prev => prev.filter(p => p.id !== data.userId));
@@ -413,7 +357,6 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       }
     };
 
-    // Handler: call ended
     const handleCallEnded = (data: any) => {
       console.log('Call ended by:', data.username);
       stopRingtone();
@@ -425,27 +368,43 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       callInitiator.current = null;
       activeCallUsers.current.clear();
       
-      // Close all peer connections
       Object.values(peerConnections.current).forEach(pc => pc.close());
       peerConnections.current = {};
     };
 
-    // Handler: existing call participants (when joining existing call)
+    const handleUserJoinedCall = (data: any) => {
+      console.log('User joined existing call:', data.username);
+      activeCallUsers.current.add(data.userId);
+      setIsCallActive(true);
+      
+      if (data.userId !== currentUser.id) {
+        toast.success(`${data.username} joined the video call`);
+      }
+      
+      setCallParticipants(prev => {
+        if (prev.some(p => p.id === data.userId)) return prev;
+        return [...prev, { id: data.userId, username: data.username }];
+      });
+
+      if (inCall && currentUser && currentUser.id !== data.userId) {
+        console.log('Creating peer connection with new joiner:', data.userId);
+        createPeerConnectionForUser(data.userId);
+      }
+    };
+
     const handleExistingCallParticipants = async (data: any) => {
       console.log('Received existing call participants:', data.participants);
-      // For each existing participant, create a peer connection and add tracks, but do NOT send an offer
       for (const participant of data.participants) {
         if (participant.id !== currentUser.id && !peerConnections.current[participant.id]) {
-          console.log('Creating peer connection with existing participant (no offer):', participant.id);
+          console.log('Creating peer connection with existing participant:', participant.id);
           const pc = createPeerConnection(participant.id);
           const stream = localStream || await getLocalStream();
           stream.getTracks().forEach(track => {
             pc.addTrack(track, stream);
           });
-          // Do NOT createOffer or setLocalDescription here!
         }
       }
-      // Also add existing participants to our call participants list
+      
       setCallParticipants(prev => {
         const newParticipants = [...prev];
         data.participants.forEach((participant: any) => {
@@ -457,46 +416,18 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       });
     };
 
-    // Handler: user joined existing call
-    const handleUserJoinedCall = (data: any) => {
-      console.log('User joined existing call:', data.username);
-      activeCallUsers.current.add(data.userId);
-      setIsCallActive(true);
-      
-      // Show toast notification for call join
-      if (data.userId !== currentUser.id) {
-        toast.success(`${data.username} joined the video call`, {
-          position: 'top-right',
-          autoClose: 3000,
-          hideProgressBar: false,
-          closeOnClick: true,
-          pauseOnHover: true,
-          draggable: true
-        });
-      }
-      
-      setCallParticipants(prev => {
-        if (prev.some(p => p.id === data.userId)) return prev;
-        return [...prev, { id: data.userId, username: data.username }];
-      });
-
-      // If we're already in the call, create peer connection with the new joiner
-      if (inCall && currentUser && currentUser.id !== data.userId) {
-        console.log('Creating peer connection with new joiner:', data.userId);
-        createPeerConnectionForUser(data.userId);
-      }
-    };
-
-    // WebRTC signaling
+    // WebRTC signaling events
     socket.on('webrtc_offer', handleOffer);
     socket.on('webrtc_answer', handleAnswer);
     socket.on('webrtc_ice_candidate', handleIceCandidate);
+    
+    // Call signaling events
     socket.on('incoming_call', handleIncomingCall);
     socket.on('call_accepted', handleCallAccepted);
     socket.on('call_rejected', handleCallRejected);
     socket.on('call_ended', handleCallEnded);
-    socket.on('existing_call_participants', handleExistingCallParticipants);
     socket.on('user_joined_call', handleUserJoinedCall);
+    socket.on('existing_call_participants', handleExistingCallParticipants);
 
     return () => {
       socket.off('webrtc_offer', handleOffer);
@@ -506,10 +437,10 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       socket.off('call_accepted', handleCallAccepted);
       socket.off('call_rejected', handleCallRejected);
       socket.off('call_ended', handleCallEnded);
-      socket.off('existing_call_participants', handleExistingCallParticipants);
       socket.off('user_joined_call', handleUserJoinedCall);
+      socket.off('existing_call_participants', handleExistingCallParticipants);
     };
-  }, [socket, currentUser, inCall, localStream, callParticipants]);
+  }, [socket, currentUser, inCall, localStream]);
 
   // Helper function to create peer connection for a user
   const createPeerConnectionForUser = async (userId: string) => {
@@ -519,25 +450,12 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       const pc = createPeerConnection(userId);
       const stream = localStream || await getLocalStream();
       
-      // Check if tracks are already added to avoid duplication
-      const existingSenders = pc.getSenders();
-      
       stream.getTracks().forEach(track => {
-        const trackExists = existingSenders.some(sender => 
-          sender.track && sender.track.kind === track.kind
-        );
-        
-        if (!trackExists) {
-          console.log('Adding track to peer connection for user:', track.kind, userId);
-          pc.addTrack(track, stream);
-        } else {
-          console.log('Track already exists for user, skipping:', track.kind, userId);
-        }
+        pc.addTrack(track, stream);
       });
       
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      console.log('Created and set local offer for user:', userId);
       
       if (socket) {
         socket.emit('webrtc_offer', {
@@ -557,11 +475,13 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     
     try {
       const stream = await getLocalStream();
+      setLocalStream(stream);
       setInCall(true);
       setIsCallActive(true);
       callInitiator.current = currentUser.id;
       activeCallUsers.current.add(currentUser.id);
       setCallParticipants([{ id: currentUser.id, username: currentUser.username, isSelf: true }]);
+      
       socket.emit('start_call', { username: currentUser.username, userId: currentUser.id });
       console.log('Started call as initiator');
     } catch (error) {
@@ -601,45 +521,25 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
     try {
       console.log('Joining existing call...');
-      setIsJoiningCall(true);
       
-      // Get local media stream
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { 
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 }
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 48000,
-          channelCount: 2
-        }
-      });
-
+      const stream = await getLocalStream();
       setLocalStream(stream);
       
-      // Add current user to call participants
       setCallParticipants(prev => {
         if (prev.some(p => p.id === currentUser.id)) return prev;
         return [...prev, { id: currentUser.id, username: currentUser.username, isSelf: true }];
       });
       
-      // Emit join call event (using correct event name)
       socket.emit('join_call', {
         userId: currentUser.id,
         username: currentUser.username
       });
 
       setInCall(true);
-      setIsJoiningCall(false);
       console.log('Successfully joined call');
       
     } catch (error) {
       console.error('Error joining call:', error);
-      setIsJoiningCall(false);
     }
   };
 
@@ -664,7 +564,6 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     activeCallUsers.current.clear();
     stopRingtone();
     
-    // Close all peer connections
     Object.values(peerConnections.current).forEach(pc => pc.close());
     peerConnections.current = {};
   };
@@ -691,7 +590,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     }
   };
 
-  // Switch camera (if supported)
+  // Switch camera
   const switchCamera = async () => {
     if (!localStream) return;
     
@@ -713,18 +612,15 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
         audio: true
       });
       
-      // Replace video track in localStream
       const newVideoTrack = newStream.getVideoTracks()[0];
       localStream.removeTrack(videoTrack);
       localStream.addTrack(newVideoTrack);
       
-      // Replace video track in all peer connections
       Object.values(peerConnections.current).forEach(pc => {
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
         if (sender) sender.replaceTrack(newVideoTrack);
       });
       
-      // Stop the new stream (we only needed the track)
       newStream.getTracks().forEach(track => track.stop());
     } catch (error) {
       console.error('Error switching camera:', error);
@@ -743,7 +639,6 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
   const setAudioOutput = (deviceId: string) => {
     setAudioOutputId(deviceId);
-    // Set sinkId for all video elements (if supported)
     setTimeout(() => {
       const videos = document.querySelectorAll('video');
       videos.forEach(video => {
@@ -767,7 +662,6 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       audioOutputId,
       availableAudioOutputs,
       isCallActive,
-      peerConnections,
       startCall,
       acceptCall,
       rejectCall,

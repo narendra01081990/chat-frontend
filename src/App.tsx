@@ -11,6 +11,7 @@ import IncomingCallModal from './components/IncomingCallModal';
 import VideoCallScreen from './components/VideoCallScreen';
 import VideoCallDebug from './components/VideoCallDebug';
 import VideoCallTest from './components/VideoCallTest';
+import SimpleVideoTest from './components/SimpleVideoTest';
 
 function App() {
   return (
@@ -39,6 +40,7 @@ function App() {
             <VideoCallScreen />
             <VideoCallDebug />
             <VideoCallTest />
+            <SimpleVideoTest />
           </div>
         </VideoCallProvider>
       </ChatProvider>
