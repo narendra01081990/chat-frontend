@@ -25,6 +25,7 @@ const VideoCallScreen: React.FC = () => {
     if (localVideoRef.current && localStream) {
       console.log('Setting local video stream');
       localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.play().catch(console.error);
     }
   }, [localStream]);
 
@@ -37,6 +38,7 @@ const VideoCallScreen: React.FC = () => {
         const videoElement = remoteVideoRefs.current[participant.id];
         if (videoElement && videoElement.srcObject !== participant.stream) {
           videoElement.srcObject = participant.stream;
+          videoElement.play().catch(console.error);
           console.log('Remote stream set for:', participant.username);
         }
       }
@@ -139,6 +141,7 @@ const VideoCallScreen: React.FC = () => {
                     if (el && participant.stream) {
                       console.log('Setting stream for video element:', participant.username);
                       el.srcObject = participant.stream;
+                      el.play().catch(console.error);
                     }
                   }}
                   className="w-full h-full object-cover"

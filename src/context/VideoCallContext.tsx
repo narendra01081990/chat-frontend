@@ -21,6 +21,7 @@ interface VideoCallContextType {
   audioOutputId: string | null;
   availableAudioOutputs: MediaDeviceInfo[];
   isCallActive: boolean;
+  peerConnections: React.MutableRefObject<{ [userId: string]: RTCPeerConnection }>;
   startCall: () => void;
   acceptCall: () => void;
   rejectCall: () => void;
@@ -42,6 +43,25 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
+    // Add TURN servers for better NAT traversal
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp'
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: [
+        'turn:global.turn.twilio.com:3478?transport=udp',
+        'turn:global.turn.twilio.com:3478?transport=tcp',
+        'turn:global.turn.twilio.com:443?transport=tcp'
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    }
   ],
   iceCandidatePoolSize: 10,
   bundlePolicy: 'max-bundle',
@@ -87,14 +107,15 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
           width: { ideal: 1280 },
-          height: { ideal: 720 }
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 }
         }, 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 48000, // High quality audio
-          channelCount: 2 // Stereo
+          sampleRate: 48000,
+          channelCount: 2
         } 
       });
 
@@ -128,6 +149,12 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
   // Create peer connection for a user
   const createPeerConnection = (userId: string) => {
     console.log('Creating peer connection for user:', userId);
+    
+    // Close existing connection if any
+    if (peerConnections.current[userId]) {
+      peerConnections.current[userId].close();
+    }
+    
     const pc = new RTCPeerConnection(ICE_SERVERS);
     
     pc.onicecandidate = (event) => {
@@ -143,23 +170,34 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
     pc.ontrack = (event) => {
       console.log('Received remote stream for user:', userId, event.streams[0]);
-      setCallParticipants(prev => {
-        const existing = prev.find(p => p.id === userId);
-        if (existing && existing.stream === event.streams[0]) {
-          return prev; // Stream already set
-        }
-        return prev.map(p => 
-          p.id === userId ? { ...p, stream: event.streams[0] } : p
-        );
-      });
+      if (event.streams && event.streams[0]) {
+        setCallParticipants(prev => {
+          const existing = prev.find(p => p.id === userId);
+          if (existing && existing.stream === event.streams[0]) {
+            return prev; // Stream already set
+          }
+          return prev.map(p => 
+            p.id === userId ? { ...p, stream: event.streams[0] } : p
+          );
+        });
+      }
     };
 
     pc.oniceconnectionstatechange = () => {
       console.log(`ICE connection state for ${userId}:`, pc.iceConnectionState);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        console.log(`Successfully connected to ${userId}`);
+      } else if (pc.iceConnectionState === 'failed') {
+        console.log(`Connection failed with ${userId}`);
+      }
     };
 
     pc.onconnectionstatechange = () => {
       console.log(`Connection state for ${userId}:`, pc.connectionState);
+    };
+
+    pc.onsignalingstatechange = () => {
+      console.log(`Signaling state for ${userId}:`, pc.signalingState);
     };
 
     peerConnections.current[userId] = pc;
@@ -687,6 +725,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       audioOutputId,
       availableAudioOutputs,
       isCallActive,
+      peerConnections,
       startCall,
       acceptCall,
       rejectCall,
@@ -704,7 +743,9 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 };
 
 export const useVideoCall = () => {
-  const ctx = useContext(VideoCallContext);
-  if (!ctx) throw new Error('useVideoCall must be used within a VideoCallProvider');
-  return ctx;
+  const context = useContext(VideoCallContext);
+  if (context === undefined) {
+    throw new Error('useVideoCall must be used within a VideoCallProvider');
+  }
+  return context;
 }; 

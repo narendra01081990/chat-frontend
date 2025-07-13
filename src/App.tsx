@@ -9,6 +9,7 @@ import { ChatProvider } from './context/ChatContext';
 import { VideoCallProvider } from './context/VideoCallContext';
 import IncomingCallModal from './components/IncomingCallModal';
 import VideoCallScreen from './components/VideoCallScreen';
+import VideoCallDebug from './components/VideoCallDebug';
 
 function App() {
   return (
@@ -35,6 +36,7 @@ function App() {
             />
             <IncomingCallModal />
             <VideoCallScreen />
+            <VideoCallDebug />
           </div>
         </VideoCallProvider>
       </ChatProvider>
