@@ -184,4 +184,4 @@ export const VideoCallProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   );
 };
 
-export const useVideoCall = () => useContext(VideoCallContext); 
+export const useVideoCall = () => useContext(VideoCallContext);
