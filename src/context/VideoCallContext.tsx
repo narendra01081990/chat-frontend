@@ -187,13 +187,27 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       console.log(`ICE connection state for ${userId}:`, pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         console.log(`Successfully connected to ${userId}`);
+        // Force update participants to trigger video display
+        setCallParticipants(prev => [...prev]);
       } else if (pc.iceConnectionState === 'failed') {
         console.log(`Connection failed with ${userId}`);
+        // Try to recreate connection
+        setTimeout(() => {
+          if (peerConnections.current[userId] && peerConnections.current[userId].iceConnectionState === 'failed') {
+            console.log(`Attempting to recreate connection with ${userId}`);
+            createPeerConnectionForUser(userId);
+          }
+        }, 2000);
       }
     };
 
     pc.onconnectionstatechange = () => {
       console.log(`Connection state for ${userId}:`, pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        console.log(`Peer connection established with ${userId}`);
+      } else if (pc.connectionState === 'failed') {
+        console.log(`Peer connection failed with ${userId}`);
+      }
     };
 
     pc.onsignalingstatechange = () => {
@@ -226,10 +240,23 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
         stream = await getLocalStream();
       }
       
-      // Add tracks to peer connection
+      // Check if tracks are already added to avoid duplication
+      const existingSenders = pc.getSenders();
+      const hasAudioTrack = existingSenders.some(sender => sender.track?.kind === 'audio');
+      const hasVideoTrack = existingSenders.some(sender => sender.track?.kind === 'video');
+      
+      // Add tracks only if they don't already exist
       stream.getTracks().forEach(track => {
-        console.log('Adding track to peer connection:', track.kind);
-        pc.addTrack(track, stream!);
+        const trackExists = existingSenders.some(sender => 
+          sender.track && sender.track.kind === track.kind
+        );
+        
+        if (!trackExists) {
+          console.log('Adding track to peer connection:', track.kind);
+          pc.addTrack(track, stream!);
+        } else {
+          console.log('Track already exists, skipping:', track.kind);
+        }
       });
 
       const answer = await pc.createAnswer();
@@ -492,12 +519,25 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       const pc = createPeerConnection(userId);
       const stream = localStream || await getLocalStream();
       
+      // Check if tracks are already added to avoid duplication
+      const existingSenders = pc.getSenders();
+      
       stream.getTracks().forEach(track => {
-        pc.addTrack(track, stream);
+        const trackExists = existingSenders.some(sender => 
+          sender.track && sender.track.kind === track.kind
+        );
+        
+        if (!trackExists) {
+          console.log('Adding track to peer connection for user:', track.kind, userId);
+          pc.addTrack(track, stream);
+        } else {
+          console.log('Track already exists for user, skipping:', track.kind, userId);
+        }
       });
       
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      console.log('Created and set local offer for user:', userId);
       
       if (socket) {
         socket.emit('webrtc_offer', {
@@ -536,6 +576,8 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     
     try {
       const stream = await getLocalStream();
+      setLocalStream(stream);
+      
       socket.emit('accept_call', { username: currentUser.username, userId: currentUser.id });
       setInCall(true);
       setIsCallActive(true);

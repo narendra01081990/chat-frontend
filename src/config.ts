@@ -1,10 +1,10 @@
 // Configuration for the chat application
 export const config = {
   // Backend URL - use environment variable or default to local IP for mobile testing
-  backendUrl: import.meta.env.VITE_BACKEND_URL || 'http://192.168.1.3:5000',
+  backendUrl: import.meta.env.VITE_BACKEND_URL || 'https://chat-backend-lfwv.onrender.com',
   
   // Socket URL - use environment variable or default to local IP for mobile testing
-  socketUrl: import.meta.env.VITE_SOCKET_URL || 'http://192.168.1.3:5000',
+  socketUrl: import.meta.env.VITE_SOCKET_URL || 'https://chat-backend-lfwv.onrender.com',
   
   // File upload settings
   maxFileSize: 10 * 1024 * 1024, // 10MB
