@@ -22,10 +22,11 @@ const VideoCallScreen: React.FC = () => {
 
   // Handle local video stream
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
+    const localVideo = localVideoRef?.current;
+    if (localVideo && localStream) {
       console.log('Setting local video stream');
-      localVideoRef.current.srcObject = localStream;
-      localVideoRef.current.play().catch(console.error);
+      localVideo.srcObject = localStream;
+      localVideo.play().catch(console.error);
     }
   }, [localStream]);
 
@@ -35,7 +36,7 @@ const VideoCallScreen: React.FC = () => {
     callParticipants.forEach(participant => {
       if (!participant.isSelf && participant.stream) {
         console.log('Setting remote stream for:', participant.username, participant.stream);
-        const videoElement = remoteVideoRefs.current[participant.id];
+        const videoElement = remoteVideoRefs?.current?.[participant.id];
         if (videoElement && videoElement.srcObject !== participant.stream) {
           videoElement.srcObject = participant.stream;
           videoElement.play().catch(console.error);
@@ -47,7 +48,7 @@ const VideoCallScreen: React.FC = () => {
 
   // Set audio output for remote videos
   useEffect(() => {
-    if (audioOutputId) {
+    if (audioOutputId && remoteVideoRefs?.current) {
       Object.values(remoteVideoRefs.current).forEach(video => {
         if (video && 'setSinkId' in video) {
           // @ts-ignore
@@ -137,11 +138,13 @@ const VideoCallScreen: React.FC = () => {
               <div key={participant.id} className="relative w-full aspect-video rounded-2xl overflow-hidden shadow-lg">
                 <video
                   ref={el => {
-                    remoteVideoRefs.current[participant.id] = el;
-                    if (el && participant.stream) {
-                      console.log('Setting stream for video element:', participant.username);
-                      el.srcObject = participant.stream;
-                      el.play().catch(console.error);
+                    if (remoteVideoRefs?.current) {
+                      remoteVideoRefs.current[participant.id] = el;
+                      if (el && participant.stream) {
+                        console.log('Setting stream for video element:', participant.username);
+                        el.srcObject = participant.stream;
+                        el.play().catch(console.error);
+                      }
                     }
                   }}
                   className="w-full h-full object-cover"
