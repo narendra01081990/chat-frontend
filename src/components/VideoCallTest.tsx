@@ -43,6 +43,7 @@ const VideoCallTest: React.FC = () => {
               <li>Call Active: {isCallActive ? 'Yes' : 'No'}</li>
               <li>Local Stream: {localStream ? 'Available' : 'Not Available'}</li>
               <li>Participants: {callParticipants.length}</li>
+              <li>Current User: {currentUser?.username}</li>
             </ul>
           </div>
 
@@ -82,6 +83,16 @@ const VideoCallTest: React.FC = () => {
                 </li>
               ))}
             </ul>
+          </div>
+
+          <div>
+            <h3 className="font-semibold mb-2">Debug Info:</h3>
+            <div className="text-xs bg-gray-100 p-2 rounded">
+              <p>Local Stream ID: {localStream?.id || 'None'}</p>
+              <p>Local Tracks: {localStream?.getTracks().map(t => t.kind).join(', ') || 'None'}</p>
+              <p>Call Participants: {callParticipants.length}</p>
+              <p>Remote Streams: {callParticipants.filter(p => !p.isSelf && p.stream).length}</p>
+            </div>
           </div>
 
           <button

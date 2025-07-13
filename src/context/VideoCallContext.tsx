@@ -121,7 +121,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     console.log('Creating peer connection for:', userId);
     
     // Close existing connection if any
-    if (peerConnections.current[userId]) {
+    if (peerConnections.current && peerConnections.current[userId]) {
       peerConnections.current[userId].close();
     }
     
@@ -171,6 +171,9 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       console.log(`Signaling state for ${userId}:`, pc.signalingState);
     };
 
+    if (!peerConnections.current) {
+      peerConnections.current = {};
+    }
     peerConnections.current[userId] = pc;
     return pc;
   };
@@ -181,7 +184,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     
     console.log('Handling offer from:', data.from);
     
-    let pc = peerConnections.current[data.from];
+    let pc = peerConnections.current?.[data.from];
     if (!pc) {
       pc = createPeerConnection(data.from);
     }
@@ -222,7 +225,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
   // Handle WebRTC answer
   const handleAnswer = async (data: any) => {
-    const pc = peerConnections.current[data.from];
+    const pc = peerConnections.current?.[data.from];
     if (pc) {
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -235,7 +238,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
 
   // Handle ICE candidate
   const handleIceCandidate = (data: any) => {
-    const pc = peerConnections.current[data.from];
+    const pc = peerConnections.current?.[data.from];
     if (pc && data.candidate) {
       try {
         pc.addIceCandidate(new RTCIceCandidate(data.candidate));
@@ -351,7 +354,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       setCallParticipants(prev => prev.filter(p => p.id !== data.userId));
       activeCallUsers.current.delete(data.userId);
       
-      if (peerConnections.current[data.userId]) {
+      if (peerConnections.current?.[data.userId]) {
         peerConnections.current[data.userId].close();
         delete peerConnections.current[data.userId];
       }
@@ -368,8 +371,10 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       callInitiator.current = null;
       activeCallUsers.current.clear();
       
-      Object.values(peerConnections.current).forEach(pc => pc.close());
-      peerConnections.current = {};
+      if (peerConnections.current) {
+        Object.values(peerConnections.current).forEach(pc => pc.close());
+        peerConnections.current = {};
+      }
     };
 
     const handleUserJoinedCall = (data: any) => {
@@ -395,7 +400,7 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     const handleExistingCallParticipants = async (data: any) => {
       console.log('Received existing call participants:', data.participants);
       for (const participant of data.participants) {
-        if (participant.id !== currentUser.id && !peerConnections.current[participant.id]) {
+        if (participant.id !== currentUser.id && !peerConnections.current?.[participant.id]) {
           console.log('Creating peer connection with existing participant:', participant.id);
           const pc = createPeerConnection(participant.id);
           const stream = localStream || await getLocalStream();
@@ -564,8 +569,10 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
     activeCallUsers.current.clear();
     stopRingtone();
     
-    Object.values(peerConnections.current).forEach(pc => pc.close());
-    peerConnections.current = {};
+    if (peerConnections.current) {
+      Object.values(peerConnections.current).forEach(pc => pc.close());
+      peerConnections.current = {};
+    }
   };
 
   // Mute/unmute
@@ -616,10 +623,12 @@ export const VideoCallProvider: React.FC<{ children: ReactNode }> = ({ children 
       localStream.removeTrack(videoTrack);
       localStream.addTrack(newVideoTrack);
       
-      Object.values(peerConnections.current).forEach(pc => {
-        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-        if (sender) sender.replaceTrack(newVideoTrack);
-      });
+      if (peerConnections.current) {
+        Object.values(peerConnections.current).forEach(pc => {
+          const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+          if (sender) sender.replaceTrack(newVideoTrack);
+        });
+      }
       
       newStream.getTracks().forEach(track => track.stop());
     } catch (error) {
